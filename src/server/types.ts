@@ -12,6 +12,7 @@ export interface ScriptDocument {
   sourceName: string;
   importedAt: string;
   plainText: string;
+  editableText: string;
   blocks: ScriptBlock[];
 }
 

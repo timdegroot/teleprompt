@@ -4,3 +4,4 @@ dist
 .env
 uploads
 tmp
+deploy/generated

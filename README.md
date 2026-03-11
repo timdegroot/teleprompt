@@ -2,20 +2,31 @@
 
 Self-hosted voice-following teleprompter for Linux. The app imports scripts, preserves line breaks and headings, and follows your place by matching recent speech against the current line and nearby lines.
 
+License: [MIT](/Users/tim/Projects/teleprompt/LICENSE)
+
 ## Stack
 
 - Frontend: React + Vite + TypeScript
 - Backend: Fastify + WebSocket
+- Database: PostgreSQL
 - Speech recognition: local `whisper.cpp` HTTP server on the same host
 - Recommended recognizer: `whisper.cpp`
 
 ## What works
 
 - Import `.md`, `.txt`, `.docx`, and `.pdf`
+- Persist projects and scripts in PostgreSQL
+- Create a library of scripts grouped by project
+- Select a stored script and run it in teleprompter mode
+- Authentication with cookie sessions
+- First-user bootstrap flow for the initial admin
+- Admin user management for creating and updating users
+- Manual scroll fallback mode with arrow-key speed control
 - Preserve blank lines as blank prompt lines
 - Keep Markdown headings separate from body lines
 - Stream microphone audio from the browser
 - Follow the script block by block based on recent transcript text
+- Stronger fuzzy matching across reordered phrasing and partial paraphrase
 - Stop advancing when you stop speaking
 
 ## Limits
@@ -23,6 +34,7 @@ Self-hosted voice-following teleprompter for Linux. The app imports scripts, pre
 - PDF extraction is best-effort. PDFs with poor structure or scanned pages will need cleanup.
 - `.docx` heading detection depends on Word styles being used properly.
 - You still need to install and configure `whisper.cpp` on the server.
+- Fuzzy matching still depends on overlapping keywords. It is more tolerant now, but it is not semantic speech understanding.
 
 ## Local setup
 
@@ -32,11 +44,19 @@ On your Linux server:
 
 1. Install Node.js 20+.
 2. Copy the project to the server.
-3. Run `npm install`.
-4. Copy `.env.example` to `.env`.
-5. Set `WHISPER_API_URL=http://127.0.0.1:8080/inference`.
-6. Run `npm run build`.
-7. Run `npm start` or use PM2.
+3. Create a PostgreSQL database and user for the app.
+4. Run `npm install`.
+5. Copy `.env.example` to `.env`.
+6. Set `DATABASE_URL`, `SESSION_SECRET`, and `WHISPER_API_URL=http://127.0.0.1:8080/inference`.
+7. Run `npm run build`.
+8. Run `npm start` or use PM2.
+
+Example PostgreSQL setup:
+
+1. `sudo -u postgres psql`
+2. `create user teleprompt with password 'replace-this';`
+3. `create database teleprompt owner teleprompt;`
+4. `grant all privileges on database teleprompt to teleprompt;`
 
 ## Recommended production layout
 
@@ -56,6 +76,27 @@ The backend supports two modes:
 - Fallback: `TRANSCRIBE_COMMAND` for shelling out to a local command per transcript pass
 
 Use `WHISPER_API_URL` on your server. The command fallback exists mainly for edge cases and local experimentation.
+
+## Authentication and bootstrap
+
+When the database is empty, the frontend shows a first-run bootstrap form.
+
+- The first account created becomes `admin`
+- Bootstrap also creates a default `General` project
+- After that, normal users sign in with email and password
+- Session state is stored in PostgreSQL and sent via an HTTP-only cookie
+
+## Teleprompter modes
+
+- `Voice follow`: uses recent transcript context and fuzzy matching to keep up with the current script position
+- `Manual scroll`: fallback mode for live shoots where you want hidden control from the keyboard
+
+Manual mode shortcuts while the teleprompter view is open:
+
+- `ArrowUp`: increase scroll speed
+- `ArrowDown`: decrease scroll speed
+- `ArrowLeft`: pause manual scrolling
+- `ArrowRight`: resume / speed up
 
 ### Recommended approach with `whisper.cpp`
 
@@ -102,6 +143,10 @@ See [`.env.example`](/Users/tim/Projects/teleprompt/.env.example).
 - `PORT`: HTTP port for the Node app
 - `HOST`: bind address
 - `UPLOAD_DIR`: uploaded file storage directory
+- `DATABASE_URL`: PostgreSQL connection string
+- `SESSION_SECRET`: secret used to hash session tokens
+- `SESSION_COOKIE_NAME`: cookie name for the app session
+- `SESSION_DURATION_DAYS`: session lifetime
 - `WHISPER_API_URL`: local Whisper HTTP endpoint such as `http://127.0.0.1:8080/inference`
 - `WHISPER_API_TIMEOUT_MS`: timeout for each transcript request
 - `TRANSCRIBE_COMMAND`: local recognizer command template with `{audioPath}`
@@ -124,31 +169,35 @@ PM2 example: [`ecosystem.config.cjs`](/Users/tim/Projects/teleprompt/ecosystem.c
 
 Nginx example: [`deploy/nginx.teleprompt.conf`](/Users/tim/Projects/teleprompt/deploy/nginx.teleprompt.conf)
 
+Generic Nginx template: [`deploy/nginx.site.conf.template`](/Users/tim/Projects/teleprompt/deploy/nginx.site.conf.template)
+
+Instance setup helper: [`scripts/setup-instance.sh`](/Users/tim/Projects/teleprompt/scripts/setup-instance.sh)
+
 ### Node app with PM2
 
 1. `cp .env.example .env`
-2. Set `WHISPER_API_URL=http://127.0.0.1:8080/inference`
-3. `npm install`
-4. `npm run build`
-5. `pm2 start ecosystem.config.cjs`
-6. `pm2 save`
+2. Set `DATABASE_URL=postgres://teleprompt:password@127.0.0.1:5432/teleprompt`
+3. Set a strong `SESSION_SECRET`
+4. Set `WHISPER_API_URL=http://127.0.0.1:8080/inference`
+5. `npm install`
+6. `npm run build`
+7. `pm2 start ecosystem.config.cjs`
+8. `pm2 save`
 
-### Nginx for `teleprompt.opussoft.eu`
+### Nginx for your domain
+For a public deployment, generate domain-specific files first:
 
-1. Copy [`deploy/nginx.teleprompt.conf`](/Users/tim/Projects/teleprompt/deploy/nginx.teleprompt.conf) to `/etc/nginx/sites-available/teleprompt.opussoft.eu`
-2. `sudo ln -s /etc/nginx/sites-available/teleprompt.opussoft.eu /etc/nginx/sites-enabled/teleprompt.opussoft.eu`
-3. `sudo nginx -t`
-4. `sudo systemctl reload nginx`
+1. `./scripts/setup-instance.sh teleprompt.opussoft.eu`
+2. Copy `deploy/generated/teleprompt.opussoft.eu/nginx.teleprompt.opussoft.eu.conf` to `/etc/nginx/sites-available/teleprompt.opussoft.eu`
+3. `sudo ln -s /etc/nginx/sites-available/teleprompt.opussoft.eu /etc/nginx/sites-enabled/teleprompt.opussoft.eu`
+4. `sudo nginx -t`
+5. `sudo systemctl reload nginx`
 
-If you use Let's Encrypt, the referenced certificate paths in the config match the standard Certbot layout:
-
-- `/etc/letsencrypt/live/teleprompt.opussoft.eu/fullchain.pem`
-- `/etc/letsencrypt/live/teleprompt.opussoft.eu/privkey.pem`
+The setup script also writes a generated `.env` file with a fresh session secret.
 
 ## Next steps worth adding
 
-- Persistent saved scripts in PostgreSQL
-- Per-user accounts
-- Manual scroll speed fallback mode
 - OCR fallback for scanned PDFs
-- Better fuzzy matching across reordered or paraphrased speech
+- Per-project membership and access controls
+- Playback history / saved prompt positions
+- Health checks and automated tests

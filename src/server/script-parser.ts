@@ -63,6 +63,26 @@ function textToBlocks(text: string): ScriptBlock[] {
   return blocks;
 }
 
+function blocksToEditableText(blocks: ScriptBlock[]): string {
+  return blocks
+    .map((block) => {
+      if (block.kind === "blank") {
+        return "";
+      }
+
+      if (block.kind === "heading") {
+        return `${"#".repeat(block.depth ?? 1)} ${block.text}`;
+      }
+
+      if (block.kind === "list") {
+        return `- ${block.text}`;
+      }
+
+      return block.text;
+    })
+    .join("\n");
+}
+
 function htmlToBlocks(html: string): ScriptBlock[] {
   const root = parse(html);
   const blocks: ScriptBlock[] = [];
@@ -161,6 +181,7 @@ export async function importDocumentFromBuffer(args: {
     sourceName: args.fileName,
     importedAt: new Date().toISOString(),
     plainText,
+    editableText: (isDocx ? blocksToEditableText(blocks) : sourceText).replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
     blocks
   };
 }
@@ -173,6 +194,7 @@ export function importDocumentFromText(sourceName: string, text: string): Script
     sourceName,
     importedAt: new Date().toISOString(),
     plainText: blocks.map((block) => block.text).join("\n"),
+    editableText: text.replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
     blocks
   };
 }
