@@ -1,0 +1,17 @@
+[Unit]
+Description=whisper.cpp HTTP transcription server
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+EnvironmentFile=/etc/teleprompt/whisper.env
+WorkingDirectory=/var/www/teleprompt
+ExecStart=/var/www/teleprompt/deploy/run-whisper-server.sh
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,61 @@
+services:
+  teleprompt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      UPLOAD_DIR: /app/uploads
+      WHISPER_API_URL: http://whisper:8080/inference
+      WHISPER_API_TIMEOUT_MS: 45000
+      TRANSCRIBE_INTERVAL_MS: 1300
+      TRANSCRIBE_WINDOW_SECONDS: 12
+      TRANSCRIBE_MIN_CHUNK_SECONDS: 2
+      TRANSCRIBE_SILENCE_MS: 900
+    depends_on:
+      whisper:
+        condition: service_started
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - teleprompt_uploads:/app/uploads
+    restart: unless-stopped
+
+  whisper-init:
+    image: ghcr.io/ggml-org/whisper.cpp:main
+    entrypoint:
+      - /bin/sh
+      - -lc
+      - |
+        set -eu
+        if [ ! -f /models/ggml-base.en.bin ]; then
+          ./models/download-ggml-model.sh base.en /models
+        fi
+    volumes:
+      - whisper_models:/models
+
+  whisper:
+    image: ghcr.io/ggml-org/whisper.cpp:main
+    depends_on:
+      whisper-init:
+        condition: service_completed_successfully
+    entrypoint:
+      - /bin/sh
+      - -lc
+      - >
+        exec whisper-whisper-server
+        --host 0.0.0.0
+        --port 8080
+        --language en
+        --model /models/ggml-base.en.bin
+    expose:
+      - "8080"
+    volumes:
+      - whisper_models:/models
+    restart: unless-stopped
+
+volumes:
+  teleprompt_uploads:
+  whisper_models:
