@@ -455,25 +455,27 @@ app.register(async (instance) => {
       websocket: true,
       preValidation: instance.authenticate
     },
-    (connection) => {
+    (socket) => {
       const chunks: Buffer[] = [];
       let chunkBytes = 0;
+      let totalBytes = 0;
       let lastSpeechAt = 0;
-      let lastTranscribedBytes = 0;
+      let lastTranscribedTotalBytes = 0;
       let lastTranscript = "";
       let transcribing = false;
 
       function resetSession(): void {
         chunks.length = 0;
         chunkBytes = 0;
+        totalBytes = 0;
         lastSpeechAt = 0;
-        lastTranscribedBytes = 0;
+        lastTranscribedTotalBytes = 0;
         lastTranscript = "";
       }
 
       const interval = setInterval(async () => {
         const now = Date.now();
-        const pendingBytes = chunkBytes - lastTranscribedBytes;
+        const pendingBytes = totalBytes - lastTranscribedTotalBytes;
         const enoughNewAudio = pendingBytes >= pcmSecondsToBytes(config.transcribeMinChunkSeconds);
         const enoughSilenceElapsed = now - lastSpeechAt >= config.transcribeSilenceMs;
         const shouldFlushTrailingSpeech = enoughSilenceElapsed && pendingBytes > 0;
@@ -502,7 +504,7 @@ app.register(async (instance) => {
           const normalized = transcript.trim();
 
           if (normalized && normalized !== lastTranscript) {
-            connection.socket.send(
+            socket.send(
               JSON.stringify({
                 type: "partial",
                 text: normalized,
@@ -512,9 +514,9 @@ app.register(async (instance) => {
             lastTranscript = normalized;
           }
 
-          lastTranscribedBytes = chunkBytes;
+          lastTranscribedTotalBytes = totalBytes;
         } catch (error) {
-          connection.socket.send(
+          socket.send(
             JSON.stringify({
               type: "error",
               message: error instanceof Error ? error.message : "Failed to transcribe audio."
@@ -529,7 +531,7 @@ app.register(async (instance) => {
         }
       }, config.transcribeIntervalMs);
 
-      connection.socket.on("message", (raw, isBinary) => {
+      socket.on("message", (raw: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         if (!isBinary) {
           try {
             const message = JSON.parse(raw.toString());
@@ -538,7 +540,7 @@ app.register(async (instance) => {
               resetSession();
             }
           } catch {
-            connection.socket.send(JSON.stringify({ type: "error", message: "Malformed control message." }));
+            socket.send(JSON.stringify({ type: "error", message: "Malformed control message." }));
           }
 
           return;
@@ -552,6 +554,7 @@ app.register(async (instance) => {
 
         chunks.push(chunk);
         chunkBytes += chunk.length;
+        totalBytes += chunk.length;
         lastSpeechAt = Date.now();
 
         const maxBytes = pcmSecondsToBytes(Math.max(config.transcribeWindowSeconds * 3, 30));
@@ -565,12 +568,12 @@ app.register(async (instance) => {
         }
       });
 
-      connection.socket.on("close", () => {
+      socket.on("close", () => {
         clearInterval(interval);
         resetSession();
       });
 
-      connection.socket.send(JSON.stringify({ type: "ready" }));
+      socket.send(JSON.stringify({ type: "ready" }));
     }
   );
 });

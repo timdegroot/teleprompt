@@ -85,8 +85,54 @@ prompt_secret() {
   local label="$1"
   local answer
   read -r -s -p "$label: " answer
-  echo
+  echo >&2
   echo "$answer"
+}
+
+require_port_number() {
+  local value="$1"
+  local label="$2"
+
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value < 1 || value > 65535 )); then
+    echo "$label must be a number between 1 and 65535." >&2
+    exit 1
+  fi
+}
+
+port_in_use() {
+  local port="$1"
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnH "( sport = :$port )" | grep -q .
+    return
+  fi
+
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$port$"
+    return
+  fi
+
+  return 1
+}
+
+prompt_available_port() {
+  local label="$1"
+  local default_value="$2"
+  local port
+
+  while true; do
+    port="$(prompt "$label" "$default_value")"
+    require_port_number "$port" "$label"
+
+    if port_in_use "$port"; then
+      echo "Port $port is already in use on this host. Choose a different port." >&2
+      default_value="$port"
+      continue
+    fi
+
+    echo "$port"
+    return
+  done
 }
 
 ensure_apt() {
@@ -158,7 +204,8 @@ if [[ -z "$APP_GROUP" ]]; then
   exit 1
 fi
 
-APP_PORT="$(prompt "Internal app port" "3000")"
+APP_PORT="$(prompt_available_port "Internal app port" "3000")"
+WHISPER_PORT="$(prompt_available_port "Whisper HTTP port" "8080")"
 DB_NAME="$(prompt "PostgreSQL database name" "teleprompt")"
 DB_USER="$(prompt "PostgreSQL database user" "teleprompt")"
 DB_PASSWORD="$(prompt_secret "PostgreSQL database password")"
@@ -171,6 +218,8 @@ ENCODED_DB_PASSWORD="$(uri_encode "$DB_PASSWORD")"
 
 require_simple_identifier "$DB_NAME" "Database name"
 require_simple_identifier "$DB_USER" "Database user"
+require_port_number "$APP_PORT" "Internal app port"
+require_port_number "$WHISPER_PORT" "Whisper HTTP port"
 
 if confirm "Install base system packages (nginx, postgresql, build tools, ffmpeg, curl, git)?" "Y"; then
   apt_install nginx postgresql postgresql-contrib git curl ca-certificates gnupg lsb-release \
@@ -209,13 +258,13 @@ DATABASE_URL=postgres://$DB_USER:$ENCODED_DB_PASSWORD@127.0.0.1:5432/$DB_NAME
 SESSION_SECRET=$SESSION_SECRET
 SESSION_COOKIE_NAME=teleprompt_session
 SESSION_DURATION_DAYS=30
-WHISPER_API_URL=http://127.0.0.1:8080/inference
+WHISPER_API_URL=http://127.0.0.1:$WHISPER_PORT/inference
 WHISPER_API_TIMEOUT_MS=45000
 TRANSCRIBE_COMMAND=
-TRANSCRIBE_INTERVAL_MS=1300
-TRANSCRIBE_WINDOW_SECONDS=12
-TRANSCRIBE_MIN_CHUNK_SECONDS=2
-TRANSCRIBE_SILENCE_MS=900
+TRANSCRIBE_INTERVAL_MS=250
+TRANSCRIBE_WINDOW_SECONDS=4
+TRANSCRIBE_MIN_CHUNK_SECONDS=0.35
+TRANSCRIBE_SILENCE_MS=120
 EOF
   chown "$APP_USER:$APP_GROUP" "$APP_DIR/.env" 2>/dev/null || true
 fi
@@ -239,7 +288,6 @@ if confirm "Install and configure whisper.cpp?" "Y"; then
   WHISPER_MODEL="$(prompt "Whisper model (base.en or small.en)" "base.en")"
   WHISPER_THREADS="$(prompt "Whisper thread count" "$(nproc 2>/dev/null || echo 4)")"
   WHISPER_PROCESSORS="$(prompt "Whisper processor count" "1")"
-
   if [[ -d "$WHISPER_DIR/.git" ]]; then
     run_root "git -C '$WHISPER_DIR' pull --ff-only"
   else
@@ -255,7 +303,7 @@ if confirm "Install and configure whisper.cpp?" "Y"; then
 WHISPER_DIR=$WHISPER_DIR
 MODEL_PATH=$WHISPER_DIR/models/ggml-$WHISPER_MODEL.bin
 HOST=127.0.0.1
-PORT=8080
+PORT=$WHISPER_PORT
 LANGUAGE=en
 THREADS=$WHISPER_THREADS
 PROCESSORS=$WHISPER_PROCESSORS

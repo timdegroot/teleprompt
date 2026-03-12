@@ -138,6 +138,17 @@ function tailWords(value: string, count: number): string {
   return words.slice(Math.max(0, words.length - count)).join(" ");
 }
 
+function suffixCoverage(candidateTokens: string[], transcriptTokens: string[]): number {
+  if (!candidateTokens.length || !transcriptTokens.length) {
+    return 0;
+  }
+
+  const candidateTail = candidateTokens.slice(-Math.min(candidateTokens.length, 5));
+  const transcriptTail = transcriptTokens.slice(-Math.min(transcriptTokens.length, 8));
+
+  return orderedCoverage(candidateTail, transcriptTail);
+}
+
 function scoreVariant(candidate: string, transcriptTail: string, transcriptTokens: string[], transcriptInfo: string[]): number {
   const candidateTokens = tokenize(candidate);
   const candidateInfo = informativeTokens(candidate);
@@ -147,9 +158,44 @@ function scoreVariant(candidate: string, transcriptTail: string, transcriptToken
   const bagScore = setCoverage(infoTokens, transcriptFocus);
   const bigramScore = setCoverage(ngrams(infoTokens, 2), ngrams(transcriptFocus, 2));
   const phraseScore = diceCoefficient(candidate, transcriptTail);
+  const suffixScore = suffixCoverage(infoTokens, transcriptFocus);
   const inclusionBonus = transcriptTail.includes(normalize(candidate)) ? 0.18 : 0;
 
-  return orderScore * 0.32 + bagScore * 0.34 + bigramScore * 0.18 + phraseScore * 0.16 + inclusionBonus;
+  return (
+    orderScore * 0.22 +
+    bagScore * 0.24 +
+    bigramScore * 0.14 +
+    phraseScore * 0.14 +
+    suffixScore * 0.26 +
+    inclusionBonus
+  );
+}
+
+function scoreBlockWindow(
+  blocks: ScriptBlock[],
+  index: number,
+  transcriptTail: string,
+  transcriptTokens: string[],
+  transcriptInfo: string[]
+): number {
+  const current = blocks[index];
+  const next = blocks[index + 1];
+  const nextTwo = blocks[index + 2];
+
+  if (!current || current.kind === "blank") {
+    return 0;
+  }
+
+  const variants = [
+    { text: current.text, weight: 1 },
+    { text: [current.text, next?.text ?? ""].join(" ").trim(), weight: 0.94 },
+    { text: [current.text, next?.text ?? "", nextTwo?.text ?? ""].join(" ").trim(), weight: 0.86 }
+  ].filter((variant) => variant.text);
+
+  return variants.reduce((highest, variant) => {
+    const score = scoreVariant(variant.text, transcriptTail, transcriptTokens, transcriptInfo) * variant.weight;
+    return Math.max(highest, score);
+  }, 0);
 }
 
 export function findBestMatchingIndex(args: {
@@ -157,7 +203,7 @@ export function findBestMatchingIndex(args: {
   transcript: string;
   currentIndex: number;
 }): number {
-  const transcriptTail = tailWords(args.transcript, 64);
+  const transcriptTail = tailWords(args.transcript, 18);
   const transcriptTokens = tokenize(transcriptTail);
   const transcriptInfo = informativeTokens(transcriptTail);
 
@@ -169,32 +215,24 @@ export function findBestMatchingIndex(args: {
   let bestScore = 0;
   const start = Math.max(0, args.currentIndex - 3);
   const end = Math.min(args.blocks.length - 1, args.currentIndex + 10);
+  const scores = new Map<number, number>();
 
   for (let index = start; index <= end; index += 1) {
     const current = args.blocks[index];
-    const next = args.blocks[index + 1];
-    const nextTwo = args.blocks[index + 2];
 
     if (!current || current.kind === "blank") {
       continue;
     }
 
-    const variants = [
-      current.text,
-      [current.text, next?.text ?? ""].join(" ").trim(),
-      [current.text, next?.text ?? "", nextTwo?.text ?? ""].join(" ").trim()
-    ].filter(Boolean);
     const proximityBias = Math.max(0, 0.08 - Math.abs(index - args.currentIndex) * 0.01);
-    let score = variants.reduce(
-      (highest, variant) => Math.max(highest, scoreVariant(variant, transcriptTail, transcriptTokens, transcriptInfo)),
-      0
-    );
+    let score = scoreBlockWindow(args.blocks, index, transcriptTail, transcriptTokens, transcriptInfo);
 
     if (index < args.currentIndex) {
       score *= 0.92;
     }
 
     score += proximityBias;
+    scores.set(index, score);
 
     if (score > bestScore) {
       bestScore = score;
@@ -204,6 +242,14 @@ export function findBestMatchingIndex(args: {
 
   if (bestScore < 0.34) {
     return args.currentIndex;
+  }
+
+  const forwardCandidates = [...scores.entries()]
+    .filter(([index, score]) => index > args.currentIndex && score >= 0.34 && bestScore - score <= 0.08)
+    .sort((left, right) => right[0] - left[0]);
+
+  if (forwardCandidates.length > 0) {
+    return forwardCandidates[0][0];
   }
 
   return bestIndex;

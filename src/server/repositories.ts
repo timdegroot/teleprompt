@@ -268,7 +268,7 @@ export async function updateProject(input: {
 
 export async function deleteProject(id: string): Promise<boolean> {
   const result = await pool.query("delete from projects where id = $1", [id]);
-  return result.rowCount > 0;
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function createScript(input: {
@@ -343,7 +343,7 @@ export async function updateScript(input: {
 
 export async function deleteScript(id: string): Promise<boolean> {
   const result = await pool.query("delete from scripts where id = $1", [id]);
-  return result.rowCount > 0;
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function projectExists(id: string): Promise<boolean> {

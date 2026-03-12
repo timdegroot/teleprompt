@@ -19,7 +19,7 @@ import {
   uploadScript
 } from "./api";
 import { findBestMatchingIndex } from "./lib/match";
-import type { Project, ScriptDocument, ScriptRecord, TranscriptEvent, User, UserRole } from "./types";
+import type { Project, ScriptBlock, ScriptDocument, ScriptRecord, TranscriptEvent, User, UserRole } from "./types";
 
 const emptyDocument: ScriptDocument = {
   title: "No script selected",
@@ -237,11 +237,16 @@ export default function App() {
   const [followMode, setFollowMode] = useState<FollowMode>("voice");
   const [manualSpeed, setManualSpeed] = useState(0);
   const [fontScale, setFontScale] = useState(1.18);
+  const [activeLineAnchor, setActiveLineAnchor] = useState(0.5);
   const [level, setLevel] = useState(0);
+  const [voicePaused, setVoicePaused] = useState(false);
   const captureRef = useRef<CaptureState | null>(null);
   const activeLineRef = useRef<HTMLDivElement | null>(null);
   const promptStageRef = useRef<HTMLDivElement | null>(null);
   const manualSpeedRef = useRef(0);
+  const speechRateRef = useRef(0);
+  const paceCarryRef = useRef(0);
+  const lastTranscriptAtRef = useRef<number | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -252,6 +257,7 @@ export default function App() {
     [scripts, selectedScriptId]
   );
   const activeDocument = selectedScript?.document ?? emptyDocument;
+  const promptBlocks = useMemo(() => buildPromptBlocks(activeDocument.blocks), [activeDocument.blocks]);
 
   useEffect(() => {
     void loadSession();
@@ -262,29 +268,154 @@ export default function App() {
   }, [manualSpeed]);
 
   useEffect(() => {
-    if (followMode !== "voice") {
+    if (view !== "teleprompter") {
       return;
     }
 
-    activeLineRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "center"
-    });
-  }, [activeIndex, followMode]);
+    const onKeyDown = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null;
+
+      if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) {
+        return;
+      }
+
+      if (event.code === "Space") {
+        event.preventDefault();
+        setVoicePaused((current) => !current);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [view]);
 
   useEffect(() => {
-    if (followMode !== "voice" || !matchTranscript.trim()) {
+    if (view !== "teleprompter" || followMode !== "voice" || voicePaused) {
+      return;
+    }
+
+    let frameId = 0;
+    let previous = performance.now();
+
+    const tick = (now: number): void => {
+      const stage = promptStageRef.current;
+      const activeLine = activeLineRef.current;
+
+      if (!stage || !activeLine) {
+        return;
+      }
+
+      const deltaSeconds = Math.max(0.001, (now - previous) / 1000);
+      previous = now;
+      const maxScrollTop = Math.max(0, stage.scrollHeight - stage.clientHeight);
+      const targetTop = Math.min(
+        maxScrollTop,
+        Math.max(0, activeLine.offsetTop - stage.clientHeight * activeLineAnchor + activeLine.clientHeight / 2)
+      );
+      const distance = targetTop - stage.scrollTop;
+
+      if (Math.abs(distance) < 1) {
+        stage.scrollTop = targetTop;
+        frameId = window.requestAnimationFrame(tick);
+        return;
+      }
+
+      const maxStep = 180 * deltaSeconds;
+      const step = Math.sign(distance) * Math.min(Math.abs(distance), maxStep);
+      stage.scrollTop += step;
+      frameId = window.requestAnimationFrame(tick);
+    };
+
+    frameId = window.requestAnimationFrame(tick);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [activeIndex, activeLineAnchor, followMode, view, voicePaused]);
+
+  useEffect(() => {
+    if (followMode !== "voice" || voicePaused || !matchTranscript.trim()) {
       return;
     }
 
     setActiveIndex((current) =>
-      findBestMatchingIndex({
-        blocks: activeDocument.blocks,
-        transcript: matchTranscript,
-        currentIndex: current
-      })
+      Math.max(
+        current,
+        findBestMatchingIndex({
+          blocks: promptBlocks,
+          transcript: matchTranscript,
+          currentIndex: current
+        })
+      )
     );
-  }, [activeDocument.blocks, followMode, matchTranscript]);
+  }, [followMode, matchTranscript, promptBlocks, voicePaused]);
+
+  useEffect(() => {
+    if (view !== "teleprompter" || followMode !== "voice" || listenStatus !== "listening" || voicePaused) {
+      return;
+    }
+
+    let frameId = 0;
+    let previous = performance.now();
+
+    const tick = (now: number): void => {
+      const deltaSeconds = (now - previous) / 1000;
+      previous = now;
+      const lastTranscriptAt = lastTranscriptAtRef.current;
+
+      if (lastTranscriptAt && Date.now() - lastTranscriptAt > 450) {
+        speechRateRef.current *= 0.82;
+
+        if (speechRateRef.current < 0.35) {
+          speechRateRef.current = 0;
+        }
+      }
+
+      if (speechRateRef.current > 0.6) {
+        paceCarryRef.current += speechRateRef.current * deltaSeconds;
+
+        setActiveIndex((current) => {
+          let nextIndex = current;
+          let remaining = paceCarryRef.current;
+
+          while (remaining > 0) {
+            const threshold = wordsNeededForAdvance(promptBlocks, nextIndex);
+
+            if (!Number.isFinite(threshold) || threshold <= 0 || remaining < threshold) {
+              break;
+            }
+
+            const advancedIndex = nextPromptIndex(promptBlocks, nextIndex);
+
+            if (advancedIndex === nextIndex) {
+              break;
+            }
+
+            remaining -= threshold;
+            nextIndex = advancedIndex;
+          }
+
+          paceCarryRef.current = remaining;
+          return nextIndex;
+        });
+      }
+
+      frameId = window.requestAnimationFrame(tick);
+    };
+
+    frameId = window.requestAnimationFrame(tick);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [followMode, listenStatus, promptBlocks, view, voicePaused]);
+
+  useEffect(() => {
+    setActiveIndex((current) => Math.min(current, Math.max(0, promptBlocks.length - 1)));
+  }, [promptBlocks]);
 
   useEffect(() => {
     if (view !== "teleprompter" || followMode !== "manual") {
@@ -327,16 +458,16 @@ export default function App() {
 
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setManualSpeed((speed) => Math.min(220, speed + 18));
+        setManualSpeed((speed) => Math.min(280, speed + 4));
       } else if (event.key === "ArrowDown") {
         event.preventDefault();
-        setManualSpeed((speed) => Math.max(-120, speed - 18));
+        setManualSpeed((speed) => Math.max(-120, speed - 4));
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
         setManualSpeed(0);
       } else if (event.key === "ArrowRight") {
         event.preventDefault();
-        setManualSpeed((speed) => (speed === 0 ? 36 : Math.min(220, speed + 18)));
+        setManualSpeed((speed) => (speed === 0 ? 8 : Math.min(280, speed + 4)));
       }
     };
 
@@ -365,6 +496,10 @@ export default function App() {
     setActiveIndex(0);
     setPartialTranscript("");
     setMatchTranscript("");
+    setVoicePaused(false);
+    speechRateRef.current = 0;
+    paceCarryRef.current = 0;
+    lastTranscriptAtRef.current = null;
     captureRef.current?.reset();
     promptStageRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [selectedScriptId]);
@@ -670,7 +805,22 @@ async function loadData(nextUser: User, preferredProjectId?: string, preferredSc
 
           if (event.type === "partial" && event.text) {
             setPartialTranscript(event.text);
-            setMatchTranscript((current) => mergeTranscriptWindow(current, event.text));
+            setMatchTranscript((current) => {
+              const merged = mergeTranscriptWindow(current, event.text);
+              const now = Date.now();
+              const previousAt = lastTranscriptAtRef.current;
+
+              if (merged.appendedWords > 0 && previousAt) {
+                const elapsedSeconds = Math.max((now - previousAt) / 1000, 0.12);
+                const instantaneousRate = merged.appendedWords / elapsedSeconds;
+                speechRateRef.current = speechRateRef.current
+                  ? speechRateRef.current * 0.7 + instantaneousRate * 0.3
+                  : instantaneousRate;
+              }
+
+              lastTranscriptAtRef.current = now;
+              return merged.text;
+            });
             setStatusMessage("Following your speech.");
             return;
           }
@@ -695,6 +845,10 @@ async function loadData(nextUser: User, preferredProjectId?: string, preferredSc
     captureRef.current = null;
     setListenStatus("idle");
     setLevel(0);
+    setVoicePaused(false);
+    speechRateRef.current = 0;
+    paceCarryRef.current = 0;
+    lastTranscriptAtRef.current = null;
     setStatusMessage("Listening stopped.");
   }
 
@@ -702,6 +856,10 @@ async function loadData(nextUser: User, preferredProjectId?: string, preferredSc
     setActiveIndex(0);
     setPartialTranscript("");
     setMatchTranscript("");
+    setVoicePaused(false);
+    speechRateRef.current = 0;
+    paceCarryRef.current = 0;
+    lastTranscriptAtRef.current = null;
     captureRef.current?.reset();
     promptStageRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -712,12 +870,14 @@ async function loadData(nextUser: User, preferredProjectId?: string, preferredSc
 
     if (nextMode === "manual") {
       await stopListening();
+      setVoicePaused(false);
       setManualSpeed((current) => (current === 0 ? 36 : current));
       setStatusMessage("Manual scroll mode active. Use arrow keys to adjust speed.");
       return;
     }
 
     setManualSpeed(0);
+    setVoicePaused(false);
     setStatusMessage("Voice follow mode active.");
   }
 
@@ -854,7 +1014,7 @@ async function loadData(nextUser: User, preferredProjectId?: string, preferredSc
         </section>
       </aside>
 
-      <main className="content">
+      <main className={view === "teleprompter" ? "content teleprompter-content" : "content"}>
         {error ? <div className="banner error-copy">{error}</div> : null}
 
         {view === "library" ? (
@@ -938,6 +1098,7 @@ async function loadData(nextUser: User, preferredProjectId?: string, preferredSc
                   Manual scroll
                 </button>
                 <span className={`status-pill status-${listenStatus}`}>{listenStatus}</span>
+                {voicePaused ? <span className="status-pill status-paused">paused</span> : null}
                 <span className="meter-value">{Math.round(level * 1000)}</span>
                 <button
                   className="primary-button"
@@ -957,25 +1118,49 @@ async function loadData(nextUser: User, preferredProjectId?: string, preferredSc
                 {followMode === "manual" ? (
                   <span className="manual-speed">
                     {manualSpeed === 0 ? "Paused" : `${manualSpeed}px/s`}
-                    <small>Up/Down adjust, Left pauses, Right resumes</small>
+                    <small>Up/Down fine adjust, Left pauses, Right resumes</small>
                   </span>
                 ) : (
                   <span className="manual-speed">
-                    Voice follow
-                    <small>Uses fuzzy matching across recent transcript context</small>
+                    {voicePaused ? "Voice follow paused" : "Voice follow"}
+                    <small>Space pauses or resumes prompt motion</small>
                   </span>
                 )}
                 <label className="range-label">
                   Prompt size
                   <input
                     type="range"
-                    min="0.85"
+                    min="0.5"
                     max="1.8"
-                    step="0.05"
+                    step="0.025"
                     value={fontScale}
                     onChange={(event) => setFontScale(Number(event.target.value))}
                   />
                 </label>
+                <label className="range-label">
+                  Active line height
+                  <input
+                    type="range"
+                    min="0.2"
+                    max="0.75"
+                    step="0.01"
+                    value={activeLineAnchor}
+                    onChange={(event) => setActiveLineAnchor(Number(event.target.value))}
+                  />
+                </label>
+                {followMode === "manual" ? (
+                  <label className="range-label">
+                    Manual speed
+                    <input
+                      type="range"
+                      min="0"
+                      max="280"
+                      step="2"
+                      value={Math.max(0, manualSpeed)}
+                      onChange={(event) => setManualSpeed(Number(event.target.value))}
+                    />
+                  </label>
+                ) : null}
               </div>
             </header>
 
@@ -989,8 +1174,8 @@ async function loadData(nextUser: User, preferredProjectId?: string, preferredSc
               className="prompt-stage"
               style={{ ["--font-scale" as string]: String(fontScale) }}
             >
-              {activeDocument.blocks.length ? (
-                activeDocument.blocks.map((block, index) => {
+              {promptBlocks.length ? (
+                promptBlocks.map((block, index) => {
                   const isActive = index === activeIndex;
                   const isPast = index < activeIndex;
 
@@ -1119,29 +1304,166 @@ function AdminUserCard(props: {
   );
 }
 
-function mergeTranscriptWindow(current: string, incoming: string): string {
+function mergeTranscriptWindow(current: string, incoming: string): { text: string; appendedWords: number } {
   const next = incoming.trim();
 
   if (!next) {
-    return current;
+    return { text: current, appendedWords: 0 };
   }
 
   if (!current.trim()) {
-    return limitWords(next, 80);
+    const text = limitWords(next, 18);
+    return { text, appendedWords: wordCount(text) };
   }
 
   if (next.includes(current)) {
-    return limitWords(next, 80);
+    const text = limitWords(next, 18);
+    return {
+      text,
+      appendedWords: Math.max(0, wordCount(text) - wordCount(limitWords(current, 18)))
+    };
   }
 
   if (current.includes(next)) {
-    return limitWords(current, 80);
+    return { text: limitWords(current, 18), appendedWords: 0 };
   }
 
-  return limitWords(`${current} ${next}`, 80);
+  const currentWords = current.trim().split(/\s+/).filter(Boolean);
+  const nextWords = next.trim().split(/\s+/).filter(Boolean);
+  let overlap = 0;
+  const maxOverlap = Math.min(currentWords.length, nextWords.length, 12);
+
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    const currentTail = currentWords.slice(-size).join(" ").toLowerCase();
+    const nextHead = nextWords.slice(0, size).join(" ").toLowerCase();
+
+    if (currentTail === nextHead) {
+      overlap = size;
+      break;
+    }
+  }
+
+  const appendedWords = nextWords.slice(overlap).length;
+  return {
+    text: limitWords([...currentWords, ...nextWords.slice(overlap)].join(" "), 18),
+    appendedWords
+  };
 }
 
 function limitWords(value: string, count: number): string {
   const words = value.trim().split(/\s+/).filter(Boolean);
   return words.slice(Math.max(0, words.length - count)).join(" ");
+}
+
+function buildPromptBlocks(blocks: ScriptBlock[]): ScriptBlock[] {
+  const promptBlocks: ScriptBlock[] = [];
+
+  blocks.forEach((block) => {
+    if (block.kind === "blank" || block.kind === "heading") {
+      promptBlocks.push(block);
+      return;
+    }
+
+    const segments = splitPromptText(block.text);
+
+    if (segments.length <= 1) {
+      promptBlocks.push(block);
+      return;
+    }
+
+    segments.forEach((segment, segmentIndex) => {
+      promptBlocks.push({
+        ...block,
+        id: `${block.id}-segment-${segmentIndex}`,
+        text: segment
+      });
+    });
+  });
+
+  return promptBlocks;
+}
+
+function splitPromptText(text: string): string[] {
+  const normalized = text.replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return [];
+  }
+
+  const phrases = normalized
+    .split(/(?<=[.!?;:])\s+|,\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const segments: string[] = [];
+  let current = "";
+
+  const flush = (): void => {
+    if (current.trim()) {
+      segments.push(current.trim());
+      current = "";
+    }
+  };
+
+  phrases.forEach((phrase) => {
+    if (!phrase) {
+      return;
+    }
+
+    const candidate = current ? `${current} ${phrase}` : phrase;
+
+    if (wordCount(candidate) <= 8 && candidate.length <= 56) {
+      current = candidate;
+      return;
+    }
+
+    flush();
+
+    if (wordCount(phrase) <= 8 && phrase.length <= 56) {
+      current = phrase;
+      return;
+    }
+
+    chunkWords(phrase, 7).forEach((chunk) => segments.push(chunk));
+  });
+
+  flush();
+
+  return segments.length ? segments : [normalized];
+}
+
+function chunkWords(text: string, size: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  const chunks: string[] = [];
+
+  for (let index = 0; index < words.length; index += size) {
+    chunks.push(words.slice(index, index + size).join(" "));
+  }
+
+  return chunks;
+}
+
+function wordCount(text: string): number {
+  return text.split(/\s+/).filter(Boolean).length;
+}
+
+function wordsNeededForAdvance(blocks: ScriptBlock[], index: number): number {
+  const current = blocks[index];
+
+  if (!current) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const words = wordCount(current.text);
+  return Math.max(2, words * 0.58);
+}
+
+function nextPromptIndex(blocks: ScriptBlock[], index: number): number {
+  for (let cursor = index + 1; cursor < blocks.length; cursor += 1) {
+    if (blocks[cursor]?.kind !== "blank") {
+      return cursor;
+    }
+  }
+
+  return index;
 }
