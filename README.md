@@ -4,6 +4,8 @@ Self-hosted voice-following teleprompter for Linux. The app imports scripts, pre
 
 License: [MIT](/Users/tim/Projects/teleprompt/LICENSE)
 
+Turnkey installer: [`scripts/install.sh`](/Users/tim/Projects/teleprompt/scripts/install.sh)
+
 ## Stack
 
 - Frontend: React + Vite + TypeScript
@@ -57,6 +59,30 @@ Example PostgreSQL setup:
 2. `create user teleprompt with password 'replace-this';`
 3. `create database teleprompt owner teleprompt;`
 4. `grant all privileges on database teleprompt to teleprompt;`
+
+## Full interactive server install
+
+For Debian/Ubuntu servers, the repo now includes an interactive installer that can:
+
+- ask for the target domain
+- install system packages
+- install Node.js
+- install and configure PostgreSQL
+- write `.env`
+- install npm dependencies and build the app
+- run DB migration
+- create the first admin account
+- install and configure `whisper.cpp`
+- create `systemd` services for Whisper and the app
+- configure Nginx
+- optionally install Certbot and request a Let's Encrypt certificate
+
+Usage:
+
+1. `chmod +x scripts/install.sh`
+2. `./scripts/install.sh`
+
+The installer asks before each major component step instead of assuming everything should be changed.
 
 ## Recommended production layout
 
@@ -166,6 +192,10 @@ In development, Vite serves the frontend and proxies `/api` and `/ws` to the bac
 ## Deployment
 
 PM2 example: [`ecosystem.config.cjs`](/Users/tim/Projects/teleprompt/ecosystem.config.cjs)
+
+Systemd app template: [`deploy/teleprompt-app.service.template`](/Users/tim/Projects/teleprompt/deploy/teleprompt-app.service.template)
+
+Systemd Whisper template: [`deploy/teleprompt-whisper.service.template`](/Users/tim/Projects/teleprompt/deploy/teleprompt-whisper.service.template)
 
 Nginx example: [`deploy/nginx.teleprompt.conf`](/Users/tim/Projects/teleprompt/deploy/nginx.teleprompt.conf)
 

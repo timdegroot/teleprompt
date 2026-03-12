@@ -1,0 +1,17 @@
+[Unit]
+Description=whisper.cpp HTTP transcription server
+After=network.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_GROUP__
+EnvironmentFile=/etc/teleprompt/whisper.env
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/deploy/run-whisper-server.sh
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

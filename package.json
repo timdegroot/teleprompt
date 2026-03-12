@@ -10,6 +10,8 @@
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
+    "migrate": "tsx src/server/migrate.ts",
+    "bootstrap-admin": "tsx src/server/bootstrap-admin.ts",
     "start": "node dist/server/index.js"
   },
   "dependencies": {

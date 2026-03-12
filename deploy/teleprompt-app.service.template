@@ -1,0 +1,17 @@
+[Unit]
+Description=Teleprompt web application
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_GROUP__
+WorkingDirectory=__APP_DIR__
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/env node dist/server/index.js
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
